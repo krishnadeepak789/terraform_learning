@@ -19,47 +19,10 @@ stages:
       inputs:
         provider: 'azurerm'
         command: 'init'
+        environmentServiceNameAzureRM: 'test-deploy'
         backendServiceArm: 'test-deploy'
         backendAzureRmResourceGroupName: 'rg-tf-backend'
         backendAzureRmStorageAccountName: 'tfstatecentrsdffds'
         backendAzureRmContainerName: 'tfstate'
         backendAzureRmKey: 'rg-centralIndia.tfstate'
 
-    - task: TerraformTask@5
-      displayName: Tf Validate
-      inputs:
-        provider: 'azurerm'
-        command: 'validate'
-
-    - task: TerraformTask@5
-      displayName: Tf fmt
-      inputs:
-        provider: 'azurerm'
-        command: 'custom'
-        outputTo: 'console'
-        customCommand: 'fmt'
-        environmentServiceNameAzureRM: 'test-deploy'
-
-    - task: TerraformTask@5
-      displayName: Tf plan
-      inputs:
-        provider: 'azurerm'
-        command: 'plan'
-        commandOptions: '-out $(Build.SourcesDirectory)/tfplanfile'
-        environmentServiceNameAzureRM: 'test-deploy'
-
-    - task: ArchiveFiles@2
-      displayName: Archive files
-      inputs:
-        rootFolderOrFile: '$(Build.SourcesDirectory)/'
-        includeRootFolder: false
-        archiveType: 'zip'
-        archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId).zip'
-        replaceExistingArchive: true
-
-    - task: PublishBuildArtifacts@1
-      displayName: Publish
-      inputs:
-        PathtoPublish: '$(Build.ArtifactStagingDirectory)'
-        ArtifactName: '$(Build.BuildId)-build'
-        publishLocation: 'Container'
