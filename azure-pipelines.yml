@@ -19,7 +19,6 @@ stages:
       inputs:
         provider: 'azurerm'
         command: 'init'
-        environmentServiceNameAzureRM: 'test-deploy'
         backendServiceArm: 'test-deploy'
         backendAzureRmResourceGroupName: 'rg-tf-backend'
         backendAzureRmStorageAccountName: 'tfstatecentrsdffds'
