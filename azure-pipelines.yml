@@ -1,40 +1,157 @@
 trigger:
-- main
+  branches:
+    include:
+      - main
+      - master
 
-pool:
-  vmImage: ubuntu-latest
+pr:
+  branches:
+    include:
+      - '*'
+
+variables:
+  TF_VERSION: '1.5.9'
+  TF_WORKING_DIR: '.'                        # change if your .tf files are in a subfolder
+  azureServiceConnection: 'test-deploy'    # <--- set to your Azure RM service connection name
+
+  # Backend storage details (update to your backend)
+  BACKEND_RESOURCE_GROUP: 'rg-tf-backend'    # RG where the storage account lives
+  STORAGE_ACCOUNT_NAME: 'tfstatecentrsdffds' # must match your existing storage account
+  STORAGE_CONTAINER_NAME: 'tfstate'          # blob container name
+  STATE_FILE_KEY: 'rg-centralIndia.tfstate'  # path/name for the tfstate blob
 
 stages:
-- stage: InstallTools
-  jobs:
-  - job: InstallTerraform
-    displayName: 'Install Terraform'
-    steps:
-    - script: |
-        echo Installing Terraform...
-        curl -fsSL https://apt.releases.hashicorp.com/gpg | sudo apt-key add -
-        sudo apt-add-repository "deb [arch=amd64] https://apt.releases.hashicorp.com $(lsb_release -cs) main"
-        sudo apt-get update && sudo apt-get install terraform
-      displayName: 'Install Terraform'
 
-- stage: DeployResources
+- stage: Plan
+  displayName: Terraform Plan
   jobs:
-  - job: TerraformDeployment
-    displayName: 'Deploy Resources with Terraform'
+  - job: Plan
+    displayName: Run Terraform Init & Plan (with remote backend)
+    pool:
+      vmImage: 'ubuntu-latest'
     steps:
+
     - checkout: self
+      clean: true
+
+    # Install Terraform on the agent
+    - script: |
+        echo "Installing Terraform ${TF_VERSION}..."
+        wget -q https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip -O terraform.zip
+        unzip -q terraform.zip -d /usr/local/bin
+        terraform -version
+      displayName: Install Terraform
+
+    # Use AzureCLI task to authenticate with the Azure service connection,
+    # fetch the storage account key and run terraform init/plan with backend-config.
+    - task: AzureCLI@2
+      displayName: Terraform init & plan (using azurerm backend)
+      inputs:
+        azureSubscription: '$(azureServiceConnection)'
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          set -euo pipefail
+          cd $(TF_WORKING_DIR)
+
+          echo "Fetching storage account key for backend..."
+          BACKEND_KEY=$(az storage account keys list \
+            --resource-group "$(BACKEND_RESOURCE_GROUP)" \
+            --account-name "$(STORAGE_ACCOUNT_NAME)" \
+            --query "[0].value" -o tsv)
+
+          echo "Initializing terraform with azurerm backend..."
+          terraform init -input=false \
+            -backend-config="storage_account_name=$(STORAGE_ACCOUNT_NAME)" \
+            -backend-config="container_name=$(STORAGE_CONTAINER_NAME)" \
+            -backend-config="key=$(STATE_FILE_KEY)" \
+            -backend-config="access_key=${BACKEND_KEY}"
+
+          terraform validate || true
+
+          echo "Running terraform plan..."
+          terraform plan -input=false -out=tfplan
+
+          # export a human readable plan for review
+          terraform show -no-color tfplan > tfplan.txt
+
+      env:
+        # Azure CLI task runs in service connection context - no ARM_* env variables required
+        # If you want to override anything via env, set it here.
+
+    - task: PublishPipelineArtifact@1
+      displayName: Publish tfplan artifact
+      inputs:
+        targetPath: '$(TF_WORKING_DIR)/tfplan'
+        artifact: 'tfplan'
+        publishLocation: 'pipeline'
 
     - script: |
-        echo Initialize Terraform
-        terraform init
-      displayName: 'Terraform Init'
+        echo "Plan summary:"
+        cat $(TF_WORKING_DIR)/tfplan.txt || true
+      displayName: Show plan text
 
-    - script: |
-        echo Terraform Plan
-        terraform plan -out=tfplan
-      displayName: 'Terraform Plan'
+- stage: Apply
+  displayName: Terraform Apply
+  dependsOn: Plan
+  condition: succeeded()
+  jobs:
+  - deployment: Apply
+    environment: 'dev-deploy'   # require approvals on this environment if desired
+    displayName: Apply terraform changes
+    pool:
+      vmImage: 'ubuntu-latest'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
 
-    - script: |
-        echo Terraform Apply
-        terraform apply -auto-approve tfplan
-      displayName: 'Terraform Apply'
+          - checkout: self
+            clean: true
+
+          - task: DownloadPipelineArtifact@2
+            displayName: Download plan artifact
+            inputs:
+              buildType: 'current'
+              artifact: 'tfplan'
+              targetPath: '$(System.DefaultWorkingDirectory)/tfplan_download'
+
+          - script: |
+              echo "Installing Terraform ${TF_VERSION}..."
+              wget -q https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip -O terraform.zip
+              unzip -q terraform.zip -d /usr/local/bin
+              terraform -version
+            displayName: Install Terraform
+
+          - task: AzureCLI@2
+            displayName: 'Apply terraform plan (with azurerm backend)'
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -euo pipefail
+                cd $(TF_WORKING_DIR)
+
+                echo "Fetching storage account key for backend..."
+                BACKEND_KEY=$(az storage account keys list \
+                  --resource-group "$(BACKEND_RESOURCE_GROUP)" \
+                  --account-name "$(STORAGE_ACCOUNT_NAME)" \
+                  --query "[0].value" -o tsv)
+
+                echo "Terraform init (with backend) before apply..."
+                terraform init -input=false \
+                  -backend-config="storage_account_name=$(STORAGE_ACCOUNT_NAME)" \
+                  -backend-config="container_name=$(STORAGE_CONTAINER_NAME)" \
+                  -backend-config="key=$(STATE_FILE_KEY)" \
+                  -backend-config="access_key=${BACKEND_KEY}"
+
+                # If plan artifact contains tfplan and was created in repo root, copy it:
+                if [ -f "$(System.DefaultWorkingDirectory)/tfplan_download/tfplan" ]; then
+                  cp "$(System.DefaultWorkingDirectory)/tfplan_download/tfplan" ./tfplan
+                fi
+
+                echo "Running terraform apply (the saved plan)..."
+                terraform apply -input=false -auto-approve ./tfplan
+            env:
+              # nothing required - AzureCLI uses the service connection
