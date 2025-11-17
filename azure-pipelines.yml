@@ -75,10 +75,6 @@ stages:
           # export a human readable plan for review
           terraform show -no-color tfplan > tfplan.txt
 
-      env:
-        # Azure CLI task runs in service connection context - no ARM_* env variables required
-        # If you want to override anything via env, set it here.
-
     - task: PublishPipelineArtifact@1
       displayName: Publish tfplan artifact
       inputs:
@@ -153,5 +149,3 @@ stages:
 
                 echo "Running terraform apply (the saved plan)..."
                 terraform apply -input=false -auto-approve ./tfplan
-            env:
-              # nothing required - AzureCLI uses the service connection
